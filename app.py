@@ -159,75 +159,6 @@ def _infer_sep(filename: str) -> str:
     return ","
 
 
-def extract_subject_id_from_sample(sample_id: str, n_parts: int = 2, delimiter: str = "-") -> str:
-    """
-    Extract subject ID from GTEx-style sample ID.
-    Example: 'GTEX-1117F-0226-SM-5GZZ7' -> 'GTEX-1117F' (first 2 parts)
-    """
-    parts = sample_id.split(delimiter)
-    return delimiter.join(parts[:n_parts])
-
-
-def merge_subject_phenotypes(
-    sample_meta: pd.DataFrame,
-    subject_pheno: pd.DataFrame,
-    sample_id_col: str,
-    subject_id_col: str = "SUBJID",
-    n_parts: int = 2,
-    delimiter: str = "-"
-) -> pd.DataFrame:
-    """
-    Merge subject-level phenotypes into sample-level metadata.
-    Extracts subject ID from sample ID and joins phenotype data.
-    
-    Args:
-        sample_meta: Sample-level metadata DataFrame
-        subject_pheno: Subject-level phenotypes DataFrame
-        sample_id_col: Column name for sample ID in sample_meta
-        subject_id_col: Column name for subject ID in subject_pheno
-        n_parts: Number of parts to extract from sample ID for subject ID
-        delimiter: Delimiter used in sample ID
-    
-    Returns:
-        Merged DataFrame with both sample and subject attributes
-    """
-    # Create a copy to avoid modifying original
-    merged = sample_meta.copy()
-    
-    # Extract subject ID from sample ID
-    merged['_SUBJID_extracted'] = merged[sample_id_col].apply(
-        lambda x: extract_subject_id_from_sample(str(x), n_parts, delimiter)
-    )
-    
-    # Prepare subject phenotypes for merge
-    subject_pheno_copy = subject_pheno.copy()
-    
-    # Rename columns to avoid conflicts (prefix with 'SUBJ_' if they exist in sample_meta)
-    rename_map = {}
-    for col in subject_pheno_copy.columns:
-        if col != subject_id_col and col in sample_meta.columns:
-            rename_map[col] = f"SUBJ_{col}"
-    if rename_map:
-        subject_pheno_copy = subject_pheno_copy.rename(columns=rename_map)
-    
-    # Merge on extracted subject ID
-    merged = merged.merge(
-        subject_pheno_copy,
-        left_on='_SUBJID_extracted',
-        right_on=subject_id_col,
-        how='left'
-    )
-    
-    # Drop helper column and duplicate subject ID column if exists
-    cols_to_drop = ['_SUBJID_extracted']
-    if subject_id_col in merged.columns and subject_id_col != sample_id_col:
-        # Keep SUBJID if useful, otherwise can drop
-        pass
-    merged = merged.drop(columns=[c for c in cols_to_drop if c in merged.columns])
-    
-    return merged
-
-
 @st.cache_data(show_spinner=False)
 def read_expression(
     path: str,
@@ -1835,31 +1766,25 @@ with st.sidebar:
     )
     sample_id_col = st.text_input("Sample ID column in metadata", value="SAMPID")
     
-    # Subject Phenotypes (optional)
     st.subheader("Subject Phenotypes (optional)")
-    st.caption("Add subject-level attributes (e.g., age, sex) to be merged with sample metadata.")
-    subj_mode = st.radio("Subject phenotypes input", ["None", "Local path", "Upload"], horizontal=True, index=0, key="subj_mode")
-    subj_path = ""
-    uploaded_subj = None
-    if subj_mode == "Local path":
-        subj_path = st.text_input("Subject phenotypes file path", value="", placeholder="/path/to/subject_phenotypes.tsv")
-    elif subj_mode == "Upload":
-        uploaded_subj = st.file_uploader("Upload subject phenotypes file", type=["tsv", "csv", "txt"], key="subj_upload")
+    st.caption("Load additional subject-level data (e.g., age, sex, death circumstances). Will be merged with sample attributes.")
+    pheno_mode = st.radio("Subject phenotypes input", ["None", "Local path", "Upload"], horizontal=True, index=0, key="pheno_mode")
+    pheno_path = ""
+    uploaded_pheno = None
+    if pheno_mode == "Local path":
+        pheno_path = st.text_input("Subject phenotypes file path", value="", placeholder="/path/to/phenotypes.tsv")
+    elif pheno_mode == "Upload":
+        uploaded_pheno = st.file_uploader("Upload subject phenotypes file", type=["tsv", "csv", "txt"], key="pheno_upload")
     
-    subj_sep = st.selectbox(
-        "Subject phenotypes separator",
+    pheno_sep = st.selectbox(
+        "Phenotypes separator",
         options=meta_sep_options,
         index=0,
         format_func=lambda x: meta_sep_labels.get(x, x),
-        key="subj_sep"
+        key="pheno_sep"
     )
-    subject_id_col = st.text_input("Subject ID column", value="SUBJID")
-    subj_id_parts = st.number_input(
-        "Parts of sample ID for subject ID", 
-        min_value=1, max_value=5, value=2,
-        help="GTEx uses first 2 parts (e.g., 'GTEX-1117F' from 'GTEX-1117F-0226-SM-5GZZ7')"
-    )
-    subj_id_delimiter = st.text_input("Sample ID delimiter", value="-", help="Delimiter in sample ID (default: -)")
+    subject_id_col = st.text_input("Subject ID column in phenotypes", value="SUBJID")
+    st.caption("For GTEx: Subject ID is extracted from Sample ID (e.g., GTEX-1117F from GTEX-1117F-0226-SM-5GZZ7)")
 
     st.divider()
     st.header("Cleaning parameters")
@@ -1918,11 +1843,11 @@ if uploaded_meta is not None:
 elif meta_path and os.path.exists(meta_path):
     meta_real_path = meta_path
 
-subj_real_path = None
-if uploaded_subj is not None:
-    subj_real_path = _save_upload_to_temp(uploaded_subj)
-elif subj_path and os.path.exists(subj_path):
-    subj_real_path = subj_path
+pheno_real_path = None
+if uploaded_pheno is not None:
+    pheno_real_path = _save_upload_to_temp(uploaded_pheno)
+elif pheno_path and os.path.exists(pheno_path):
+    pheno_real_path = pheno_path
 
 tabs = st.tabs(["1) Load", "2) Transform & Filter", "3) Normalize", "4) PCA", "5) Outliers", "6) Confounders & Export"])
 
@@ -1978,57 +1903,62 @@ with tabs[0]:
         try:
             meta_df = pd.read_csv(meta_real_path, sep=meta_sep)
             st.session_state["meta"] = meta_df
-            st.write("Metadata preview:")
+            st.write("**Sample Attributes** preview:")
             st.dataframe(meta_df.head(8), use_container_width=True)
-            st.write(f"Metadata rows: {meta_df.shape[0]:,}, columns: {meta_df.shape[1]:,}")
+            st.write(f"Sample attributes rows: {meta_df.shape[0]:,}, columns: {meta_df.shape[1]:,}")
         except Exception as e:
             st.error(f"Failed reading metadata: {e}")
     
-    # Load and merge subject phenotypes if provided
-    if subj_real_path:
+    # Load subject phenotypes if provided
+    if pheno_real_path:
         try:
-            subj_df = pd.read_csv(subj_real_path, sep=subj_sep)
-            st.session_state["subject_pheno"] = subj_df
+            pheno_df = pd.read_csv(pheno_real_path, sep=pheno_sep)
+            st.session_state["pheno"] = pheno_df
+            st.write("**Subject Phenotypes** preview:")
+            st.dataframe(pheno_df.head(8), use_container_width=True)
+            st.write(f"Subject phenotypes rows: {pheno_df.shape[0]:,}, columns: {pheno_df.shape[1]:,}")
             
-            st.markdown("---")
-            st.markdown("### Subject Phenotypes")
-            st.write("Subject phenotypes preview:")
-            st.dataframe(subj_df.head(8), use_container_width=True)
-            st.write(f"Subject phenotypes rows: {subj_df.shape[0]:,}, columns: {subj_df.shape[1]:,}")
-            st.write(f"Columns: {list(subj_df.columns)}")
-            
-            # Merge with sample metadata if both are available
-            if "meta" in st.session_state:
+            # Merge with sample attributes if both are loaded
+            if "meta" in st.session_state and sample_id_col in st.session_state["meta"].columns:
                 meta_df = st.session_state["meta"]
-                if sample_id_col in meta_df.columns:
-                    st.markdown("#### Merging Subject Phenotypes with Sample Metadata")
+                
+                # Extract subject ID from sample ID (GTEx format: GTEX-XXXXX-... -> GTEX-XXXXX)
+                def extract_subject_id(sample_id: str) -> str:
+                    """Extract subject ID from GTEx-style sample ID."""
+                    parts = str(sample_id).split("-")
+                    if len(parts) >= 2:
+                        return "-".join(parts[:2])  # GTEX-XXXXX
+                    return sample_id
+                
+                meta_df["_extracted_subjid"] = meta_df[sample_id_col].apply(extract_subject_id)
+                
+                # Merge phenotypes
+                if subject_id_col in pheno_df.columns:
+                    # Avoid duplicate columns
+                    pheno_cols_to_add = [c for c in pheno_df.columns if c not in meta_df.columns and c != subject_id_col]
+                    merged_df = meta_df.merge(
+                        pheno_df[[subject_id_col] + pheno_cols_to_add],
+                        left_on="_extracted_subjid",
+                        right_on=subject_id_col,
+                        how="left"
+                    )
+                    # Drop helper columns
+                    merged_df = merged_df.drop(columns=["_extracted_subjid"], errors="ignore")
+                    if subject_id_col in merged_df.columns and subject_id_col != sample_id_col:
+                        pass  # Keep SUBJID column for reference
                     
-                    # Show example of extraction
-                    example_sample = meta_df[sample_id_col].iloc[0] if len(meta_df) > 0 else "GTEX-1117F-0226-SM-5GZZ7"
-                    example_subj = extract_subject_id_from_sample(str(example_sample), int(subj_id_parts), subj_id_delimiter)
-                    st.caption(f"Example: '{example_sample}' → Subject ID: '{example_subj}'")
+                    st.session_state["meta"] = merged_df
+                    st.session_state["meta_merged"] = True
                     
-                    if st.button("Merge subject phenotypes into sample metadata", type="secondary"):
-                        with st.spinner("Merging..."):
-                            merged_meta = merge_subject_phenotypes(
-                                meta_df,
-                                subj_df,
-                                sample_id_col=sample_id_col,
-                                subject_id_col=subject_id_col,
-                                n_parts=int(subj_id_parts),
-                                delimiter=subj_id_delimiter
-                            )
-                        st.session_state["meta"] = merged_meta
-                        st.success(f"Merged! New metadata has {merged_meta.shape[1]} columns (was {meta_df.shape[1]}).")
-                        st.write("New columns added from subject phenotypes:")
-                        new_cols = [c for c in merged_meta.columns if c not in meta_df.columns]
-                        st.write(new_cols)
-                        st.write("Merged metadata preview:")
-                        st.dataframe(merged_meta.head(8), use_container_width=True)
+                    st.success(f"✅ Merged sample attributes with subject phenotypes!")
+                    st.write(f"**Combined metadata:** {merged_df.shape[0]:,} rows, {merged_df.shape[1]:,} columns")
+                    st.write("New columns from phenotypes:", pheno_cols_to_add)
+                    
+                    # Show merged preview
+                    with st.expander("Preview merged metadata"):
+                        st.dataframe(merged_df.head(8), use_container_width=True)
                 else:
-                    st.warning(f"Sample ID column '{sample_id_col}' not found in metadata. Cannot merge.")
-            else:
-                st.info("Load sample metadata first to merge subject phenotypes.")
+                    st.warning(f"Subject ID column '{subject_id_col}' not found in phenotypes file.")
         except Exception as e:
             st.error(f"Failed reading subject phenotypes: {e}")
 
