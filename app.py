@@ -182,6 +182,7 @@ def read_expression(
         infer_schema_length=infer_schema_length,
         null_values=["NA", "NaN", "nan", ""],
         ignore_errors=True,
+        truncate_ragged_lines=True,
     )
     # Collect a small preview early
     # Use polars native methods to avoid numpy/pyarrow compatibility issues
@@ -226,6 +227,7 @@ def load_expression_to_memory(
         infer_schema_length=infer_schema_length,
         null_values=["NA", "NaN", "nan", ""],
         ignore_errors=True,
+        truncate_ragged_lines=True,
     )
 
     # Ensure sample columns are numeric
