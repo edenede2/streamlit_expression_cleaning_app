@@ -1794,7 +1794,7 @@ with st.sidebar:
     min_tpm = st.number_input("Min expression (raw scale)", min_value=0.0, value=1.0, step=0.1)
     min_samples_fraction = st.slider("Min fraction of samples expressing gene", 0.0, 1.0, 0.2, 0.05)
     min_samples_floor = st.number_input("Min samples floor", min_value=1, value=10, step=1)
-    var_quantile = st.slider("Variance quantile cutoff (log2 scale)", 0.0, 0.9, 0.2, 0.05)
+    var_quantile = st.slider("Variance quantile cutoff (log2 scale)", 0.0, 0.9, 0.25, 0.05)
 
     do_quantile_norm = st.checkbox("Quantile normalize (after filtering)", value=True)
     qn_fast = st.checkbox("Use fast quantile normalization", value=True, help="Faster; approximate tie handling.")
