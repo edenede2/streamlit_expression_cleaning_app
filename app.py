@@ -5,9 +5,122 @@ Streamlit app: Expression Matrix Preprocessing & Cleaning
 Designed to be GENERALIZABLE:
 - Works with any gene-by-sample matrix in TSV/CSV (genes in rows, samples in columns)
 - Optionally joins a sample metadata table for PCA coloring + confounder regression
-- Implements common steps from the provided notebook:
+- Implements common preprocessing steps for gene expression analysis (including ssGSEA):
   log2(x+1) transform, low-expression + low-variance filtering, quantile normalization,
   PCA visualization, outlier detection, and confounder regression (residualization).
+
+PREPROCESSING WORKFLOW (ssGSEA-ready):
+==================================
+
+This app implements a comprehensive 6-step preprocessing pipeline following best practices
+for gene expression data analysis. These steps prepare data for downstream analyses like
+ssGSEA, GSEA, differential expression, or other pathway/network analyses.
+
+Step 1: DATA LOADING
+--------------------
+- Load gene-by-sample expression matrix (genes in rows, samples in columns)
+- Support for TSV/CSV with flexible column configuration
+- Optional sample metadata loading and merging
+- Subject phenotype integration (e.g., GTEx subject-level data)
+
+Step 2: LOG TRANSFORMATION & FILTERING
+---------------------------------------
+A. Log2(x+1) Transformation:
+   - Converts raw TPM/counts to log scale: log2(TPM + 1)
+   - Stabilizes variance across expression ranges
+   - Makes data approximately normal for statistical methods
+
+B. Low-Expression Filtering:
+   - Remove genes with insufficient expression across samples
+   - Threshold: gene must have TPM ≥ min_tpm in ≥ min_samples
+   - Reduces noise and improves statistical power
+   - Typical: TPM ≥ 1.0 in ≥ 20% of samples
+
+C. Low-Variance Filtering:
+   - Remove genes with low variance (applied on log2 data)
+   - Threshold: variance ≥ quantile cutoff (e.g., 20th percentile)
+   - Removes non-informative genes with minimal biological variation
+   - Critical for reducing dimensionality in PCA
+
+Step 3: QUANTILE NORMALIZATION (Optional)
+------------------------------------------
+- Makes expression distributions identical across all samples
+- Corrects for technical variation between samples/batches
+- Algorithm (from notebook):
+  1. Transpose to samples × genes
+  2. Sort values in each column independently
+  3. Calculate row means of sorted matrix (average by rank)
+  4. Replace each value with mean of its rank position
+  5. Transpose back to genes × samples
+- Essential when samples processed in different batches
+- Can be skipped if data already well-normalized (e.g., TPM from same pipeline)
+
+Step 4: QUALITY CONTROL with PCA
+---------------------------------
+- Principal Component Analysis on samples (not genes)
+- Visualizes sample relationships in low-dimensional space
+- Enables detection of batch effects, technical artifacts, outliers
+- Color by metadata to assess confounders (RIN, ischemic time, batch, etc.)
+- Gene-attribute correlation analysis to quantify confounder effects
+- Variance explained plot shows data dimensionality
+
+Step 5: OUTLIER DETECTION
+--------------------------
+Three complementary methods to identify problematic samples:
+
+A. Mahalanobis Distance (in PCA space):
+   - Measures multivariate distance from sample centroid
+   - Uses first N principal components
+   - Chi-squared threshold for statistical outlier definition
+   - Best for: detecting samples with unusual overall expression patterns
+
+B. Hierarchical Clustering (Ward linkage):
+   - Clusters samples based on PCA coordinates
+   - Outliers = samples in small isolated clusters
+   - Dendrogram visualization shows sample relationships
+   - Best for: detecting batch-specific or group-specific outliers
+
+C. IQR Method (on individual PCs):
+   - Detects outliers in each PC using interquartile range
+   - Union of outliers across first N PCs
+   - Simple and interpretable
+   - Best for: detecting samples extreme in individual PCs
+
+Combined: Union of all methods for robust outlier detection
+
+Step 6: CONFOUNDER REGRESSION (Optional)
+-----------------------------------------
+- Remove technical variation while preserving biological signal
+- Multi-output linear regression: regress covariates from expression
+- Returns residuals: variation NOT explained by confounders
+- Supports numeric (RIN, age, PMI) and categorical (batch, sex) covariates
+- One-hot encoding for categorical variables
+- PCA before/after visualization confirms confounder removal
+- Essential for: removing batch effects, RIN effects, ischemic time effects
+
+FINAL OUTPUT
+------------
+- Preprocessed expression matrix ready for downstream analysis
+- All filtering, normalization, and correction steps applied
+- Outlier samples removed (if selected)
+- Technical confounders regressed out (if selected)
+- Export formats: CSV or Parquet
+- Compatible with ssGSEA, GSEA, pathway analysis, differential expression
+
+REFERENCES & RATIONALE
+----------------------
+These preprocessing steps follow established best practices:
+- Log transformation: standard for RNA-seq and array data analysis
+- Filtering: reduces noise, improves multiple testing correction
+- Quantile normalization: removes systematic technical variation (Bolstad et al. 2003)
+- QC/PCA: essential quality control step (GTEx Consortium guidelines)
+- Outlier removal: improves robustness of downstream analyses
+- Batch correction: removes technical confounders (Johnson et al. 2007, ComBat)
+
+For ssGSEA specifically:
+- Proper normalization ensures comparable enrichment scores across samples
+- Outlier removal prevents false pathway signals from bad samples
+- Batch correction removes technical pathway enrichment artifacts
 
 Run:
   streamlit run app.py
@@ -15,6 +128,7 @@ Run:
 Notes:
 - For very large matrices, prefer "Local path" over upload.
 - Quantile normalization can be slow for very large matrices; start with a subset / skip it.
+- Disable quantile normalization if data already well-normalized (e.g., GTEx TPM)
 """
 from __future__ import annotations
 
@@ -41,9 +155,46 @@ from scipy.stats import chi2, pearsonr
 
 def quantile_normalize_notebook(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Quantile normalization using the exact method from the notebook.
-    Input: genes x samples DataFrame
-    Output: quantile normalized genes x samples DataFrame
+    Quantile normalization using the exact method from the ssGSEA tutorial notebook.
+    
+    This is Step 3 of the preprocessing pipeline.
+    
+    Purpose:
+    --------
+    - Makes expression distributions identical across all samples
+    - Removes systematic technical variation between samples
+    - Essential when samples come from different batches or processing runs
+    - Enables fair comparison of expression levels between samples
+    
+    Algorithm (from notebook):
+    -------------------------
+    1. Transpose to samples × genes (each column is a gene)
+    2. Sort values in each gene column independently
+    3. Calculate row means of sorted matrix (average expression at each rank)
+    4. Create rank matrix for each gene column
+    5. Replace each value with the mean expression at its rank position
+    6. Transpose back to genes × samples
+    
+    Mathematical Basis:
+    ------------------
+    After quantile normalization, all samples have identical empirical distributions.
+    This removes distributional differences caused by:
+    - Library size variation
+    - GC content bias
+    - Batch effects
+    - Sample processing differences
+    
+    When to Use:
+    -----------
+    ✅ Use when: Samples from different batches, sequencing runs, or labs
+    ✅ Use when: Sample distributions visibly different in QC plots
+    ❌ Skip when: Data already normalized (e.g., GTEx normalized TPM)
+    ❌ Skip when: Preserving exact expression magnitudes is critical
+    
+    Input: genes × samples DataFrame (log2-transformed, filtered)
+    Output: quantile normalized genes × samples DataFrame
+    
+    Reference: Bolstad et al. (2003) Bioinformatics
     """
     # Transpose to samples x genes, normalize, transpose back
     df_t = df.T
@@ -252,6 +403,30 @@ def load_expression_to_memory(
 
 
 def log2p1(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Log2(x+1) transformation for gene expression data.
+    
+    This is Step 2A of the preprocessing pipeline.
+    
+    Purpose:
+    --------
+    - Stabilizes variance across expression range (reduces heteroscedasticity)
+    - Makes data approximately normally distributed for statistical methods
+    - Adding 1 before log handles zero expression values
+    
+    Input: Raw expression values (TPM, RPKM, or counts)
+    Output: Log2-transformed values
+    
+    Why log2 instead of ln?
+    - log2 has intuitive interpretation: difference of 1 = 2-fold change
+    - Standard in gene expression analysis (microarray and RNA-seq)
+    
+    Args:
+        df: Gene-by-sample expression matrix (raw scale)
+    
+    Returns:
+        Log2-transformed matrix: log2(expression + 1)
+    """
     return np.log2(df.astype(float) + 1.0)
 
 
@@ -262,9 +437,47 @@ def filter_low_expression_and_variance(
     var_quantile: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Returns boolean masks:
-      keep_expr: gene passes expression filter on raw scale
-      keep_var:  gene passes variance filter on log2(x+1) scale
+    Filter genes by expression level and variance.
+    
+    This is Step 2B and 2C of the preprocessing pipeline.
+    
+    Purpose:
+    --------
+    1. Remove lowly expressed genes (noise reduction)
+       - Genes with TPM < min_tpm in most samples are likely noise
+       - Reduces false positives in downstream analyses
+       
+    2. Remove low-variance genes (dimensionality reduction)
+       - Genes with minimal variance provide little information
+       - Improves PCA and reduces computational burden
+       - Applied on log2-transformed data
+    
+    Filter Logic:
+    -------------
+    Expression filter (raw scale):
+        Keep gene if: (expression >= min_tpm) in >= min_samples
+        
+    Variance filter (log2 scale):
+        Keep gene if: variance(log2(x+1)) >= var_quantile threshold
+        
+    Both filters must pass for gene to be retained.
+    
+    Typical Parameters:
+    -------------------
+    - min_tpm: 0.5 to 2.0 (depends on sequencing depth)
+    - min_samples: 20% to 50% of total samples
+    - var_quantile: 0.1 to 0.3 (keep top 70-90% most variable genes)
+    
+    Args:
+        X_raw: Gene-by-sample matrix (raw expression values)
+        min_tpm: Minimum expression threshold
+        min_samples: Minimum number of samples that must exceed threshold
+        var_quantile: Variance quantile cutoff (0 to 1)
+    
+    Returns:
+        keep_expr: Boolean mask for expression filter
+        keep_var: Boolean mask for variance filter
+        (Use: keep_both = keep_expr & keep_var)
     """
     Xv = X_raw.to_numpy(dtype=float, copy=False)
     keep_expr = (Xv >= min_tpm).sum(axis=1) >= int(min_samples)
@@ -303,8 +516,39 @@ def quantile_normalize_fast(X: np.ndarray) -> np.ndarray:
 
 def pca_on_samples(X_gene_by_sample: pd.DataFrame, n_components: int = 10) -> Tuple[np.ndarray, PCA]:
     """
-    PCA on samples (columns). Input is genes x samples.
-    Returns (scores: samples x n_components, fitted PCA).
+    Principal Component Analysis on samples (Step 4 of preprocessing pipeline).
+    
+    Purpose:
+    --------
+    - Quality control: visualize sample relationships and identify outliers
+    - Batch effect detection: see if samples cluster by technical factors
+    - Dimensionality assessment: how much variance is explained by top PCs
+    - Confounder identification: correlate PCs with technical covariates
+    
+    Why PCA on Samples (not genes)?
+    -------------------------------
+    - We want to understand sample-to-sample relationships
+    - Each sample becomes a point in PC space
+    - Clustering indicates similarity in overall expression patterns
+    - Outlier samples appear as isolated points
+    
+    Process:
+    -------
+    1. Transpose matrix to samples × genes
+    2. Standardize (z-score) each gene across samples
+    3. Compute principal components
+    4. Return PC scores for each sample
+    
+    Interpretation:
+    --------------
+    - PC1 often captures largest technical effect (batch, RIN, etc.)
+    - Subsequent PCs capture additional variation
+    - Samples should cluster by biological groups, not technical batches
+    
+    Input: genes x samples DataFrame (normalized, filtered)
+    Returns: 
+        scores: samples × n_components array (PC coordinates)
+        pca: fitted PCA model (for variance explained, loadings, etc.)
     """
     # samples x genes
     Y = X_gene_by_sample.T.to_numpy(dtype=float)
@@ -321,8 +565,48 @@ def detect_outliers_mahalanobis(
     chi2_quantile: float,
 ) -> np.ndarray:
     """
-    Outlier detection by Mahalanobis distance in PCA space.
-    Returns boolean mask (samples,).
+    Outlier detection by Mahalanobis distance in PCA space (Step 5, Method A).
+    
+    Purpose:
+    --------
+    - Identify samples with unusual multivariate expression patterns
+    - More sensitive than univariate outlier detection
+    - Accounts for correlations between principal components
+    
+    Method:
+    -------
+    1. Compute center (mean) and covariance in first 'df' PCs
+    2. Calculate Mahalanobis distance for each sample from center
+    3. Under normality, squared distance follows chi-squared distribution with df degrees of freedom
+    4. Samples exceeding chi2_quantile threshold are outliers
+    
+    Mahalanobis Distance:
+    --------------------
+    Measures how many standard deviations away a point is from the center,
+    accounting for covariance structure. Unlike Euclidean distance, it's
+    scale-invariant and accounts for correlations.
+    
+    When to Flag as Outlier:
+    ------------------------
+    - Default: chi2_quantile = 0.95 (flag top 5% most distant samples)
+    - Strict: chi2_quantile = 0.99 (flag only extreme outliers)
+    - Lenient: chi2_quantile = 0.90 (flag more samples as potential outliers)
+    
+    Common Causes of Outliers:
+    --------------------------
+    - Poor sample quality (degraded RNA, low RIN)
+    - Technical failures (library prep, sequencing)
+    - Contamination
+    - Mislabeled samples
+    - True biological outliers (rare disease states)
+    
+    Args:
+        scores: PCA scores matrix (samples × PCs)
+        df: Number of PCs to use (degrees of freedom)
+        chi2_quantile: Chi-squared threshold quantile (0-1)
+    
+    Returns:
+        Boolean mask: True = outlier, False = normal sample
     """
     center = np.mean(scores[:, :df], axis=0)
     cov = np.cov(scores[:, :df].T)
@@ -423,8 +707,71 @@ def regress_out_confounders(
     covariates: List[str],
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Regresses covariates from expression (multi-output linear regression).
-    Input: genes x samples. Output: residuals genes x samples (for samples kept without NaNs).
+    Regress out technical confounders from expression data (Step 6 of preprocessing).
+    
+    Purpose:
+    --------
+    - Remove technical variation while preserving biological signal
+    - Correct for known confounding factors:
+      * RIN (RNA Integrity Number) - sample quality
+      * Ischemic time - post-mortem interval effects
+      * Batch - processing batch effects
+      * Age, sex - demographic factors (if not of interest)
+    
+    Method: Multi-Output Linear Regression
+    --------------------------------------
+    For each gene:
+        expression = β₀ + β₁×covariate₁ + β₂×covariate₂ + ... + ε
+        
+    Returns residuals (ε): variation NOT explained by covariates
+    
+    Residuals retain:
+    - Biological variation of interest
+    - Random noise
+    
+    Residuals remove:
+    - Systematic effects of confounders
+    - Batch effects
+    - Technical artifacts
+    
+    Covariate Handling:
+    ------------------
+    - Numeric covariates (RIN, age, PMI): used directly
+    - Categorical covariates (batch, sex): one-hot encoded
+    - Missing values: samples with any missing covariate are excluded
+    
+    When to Use:
+    -----------
+    ✅ Use when: Known technical confounders correlate with PCs
+    ✅ Use when: Batch effects visible in PCA
+    ✅ Use when: RIN or other quality metrics affect expression
+    ❌ Skip when: Confounders are of biological interest
+    ❌ Skip when: No metadata available
+    
+    Validation:
+    ----------
+    After regression:
+    - Check PCA: confounder effects should be reduced
+    - Check gene-attribute correlations: should be near zero
+    - Variance explained by PCs should decrease (technical variance removed)
+    
+    Alternative Methods:
+    -------------------
+    - ComBat: specialized batch correction (preserves biological variance)
+    - limma removeBatchEffect: similar linear regression approach
+    - SVA: estimates hidden confounders from data
+    
+    This method is most appropriate when confounders are known and measured.
+    
+    Args:
+        X_gene_by_sample: Normalized expression matrix (genes × samples)
+        meta: Sample metadata DataFrame
+        sample_id_col: Column name for sample IDs in metadata
+        covariates: List of covariate columns to regress out
+    
+    Returns:
+        resid_df: Residuals matrix (genes × kept_samples)
+        kept_samples: Sample IDs kept (without missing covariates)
     """
     sample_ids = list(X_gene_by_sample.columns)
     Xcov, kept_samples = build_covariate_matrix(meta, sample_ids, sample_id_col, covariates)
@@ -1716,6 +2063,65 @@ st.caption(
     "Load a gene-by-sample expression matrix, filter & normalize, visualize PCA, detect outliers, "
     "and optionally regress out technical confounders."
 )
+
+# Add preprocessing workflow overview
+with st.expander("📋 **Preprocessing Workflow Overview** (Click to expand)", expanded=False):
+    st.markdown("""
+    This app implements a comprehensive **6-step preprocessing pipeline** for gene expression data,
+    following best practices for RNA-seq and microarray analysis. The output is ready for downstream
+    analyses like **ssGSEA**, GSEA, differential expression, or pathway analysis.
+    
+    ### Pipeline Steps:
+    
+    #### 1️⃣ **Data Loading**
+    - Load gene-by-sample expression matrix (TSV/CSV format)
+    - Integrate sample metadata and subject phenotypes
+    - Flexible column configuration
+    
+    #### 2️⃣ **Log Transformation & Filtering**
+    - **Log2(x+1)** transformation to stabilize variance
+    - **Low-expression filtering**: Remove genes with insufficient expression
+    - **Low-variance filtering**: Remove non-informative genes
+    
+    #### 3️⃣ **Quantile Normalization** (Optional)
+    - Makes sample distributions identical
+    - Removes systematic technical variation between samples
+    - Essential for multi-batch data
+    
+    #### 4️⃣ **Quality Control with PCA**
+    - Principal Component Analysis on samples
+    - Visualize batch effects and technical artifacts
+    - Gene-attribute correlation analysis
+    
+    #### 5️⃣ **Outlier Detection**
+    - **Mahalanobis distance**: Detect multivariate outliers in PCA space
+    - **Hierarchical clustering**: Find isolated sample groups
+    - **IQR method**: Detect extreme samples in individual PCs
+    
+    #### 6️⃣ **Confounder Regression** (Optional)
+    - Remove technical variation (batch, RIN, ischemic time, etc.)
+    - Preserve biological signal
+    - Returns residuals ready for analysis
+    
+    ### Why These Steps?
+    
+    - **Log transformation**: Required for normality assumptions in most statistical methods
+    - **Filtering**: Reduces noise and improves multiple testing correction
+    - **Quantile normalization**: Ensures comparable expression distributions across samples
+    - **QC/PCA**: Essential for identifying problematic samples and batch effects
+    - **Outlier removal**: Prevents false signals from technical failures
+    - **Batch correction**: Removes known confounders while preserving biology
+    
+    ### For ssGSEA:
+    Proper preprocessing ensures:
+    - ✅ Comparable enrichment scores across samples
+    - ✅ Removal of technical artifacts that could create false pathway signals
+    - ✅ Consistent gene expression distributions for robust statistical inference
+    
+    ---
+    **📚 Reference**: These steps follow GTEx Consortium guidelines and established RNA-seq
+    preprocessing best practices.
+    """)
 
 with st.sidebar:
     st.header("Input")
