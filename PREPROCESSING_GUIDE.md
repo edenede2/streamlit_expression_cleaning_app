@@ -44,7 +44,7 @@ The app implements a **6-step preprocessing pipeline** following best practices 
 - Makes data approximately normal for statistical methods
 - Adding 1 handles zero expression values
 
-**Formula**: `log2(TPM + 1)`
+**Formula**: `log2(expression_value + 1)` where expression_value is TPM, RPKM, FPKM, or raw counts
 
 **When to use**:
 - ✅ Always for raw TPM, RPKM, FPKM values
@@ -266,6 +266,8 @@ Three complementary methods for robust detection:
 ```
 For each gene:
     expression = β₀ + β₁×RIN + β₂×batch + β₃×age + ... + ε
+    
+    where predicted = β₀ + β₁×RIN + β₂×batch + β₃×age + ...
     
 Return ε (residuals) = expression - predicted
 ```
